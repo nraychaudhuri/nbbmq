@@ -1,9 +1,10 @@
 package nbbmq.akka.mailbox
 
 import akka.dispatch._
-import akka.actor.{ActorSystem, ActorRef}
+import akka.actor.{Scheduler, ActorSystem, ActorRef}
 import com.typesafe.config.Config
 import nbbmq.akka.util.AtomicCounter
+
 
 trait NonBlockingBoundedMessageQueueSemantics {
   def capacity: Long
@@ -11,43 +12,38 @@ trait NonBlockingBoundedMessageQueueSemantics {
 
 object NonBlockingBoundedMailbox {
   
-  class NonBlockingBoundedMessageQueue(val capacity: Long) extends AbstractNodeQueue[Envelope]
+  class Nbbmq(capacity: Long, deadLetters: Option[ActorRef]) extends NonBlockingBoundedQueue[Envelope](capacity)
     with MessageQueue with NonBlockingBoundedMessageQueueSemantics {
-
-    val runningCount: AtomicCounter = new AtomicCounter(0)
 
     override def cleanUp(owner: ActorRef, deadLetters: MessageQueue): Unit = {
       while(hasMessages) { deadLetters.enqueue(owner, dequeue())}
     }
-
     override def hasMessages: Boolean = !isEmpty
     override def numberOfMessages: Int = count()
-    override def dequeue(): Envelope = poll()
 
-    override def enqueue(receiver: ActorRef, handle: Envelope): Unit = {
-      add(handle)
-      var value = runningCount.addAndGet(1)
-      do {
-        if(value > capacity){
-          poll() //dropping messages
-          value = runningCount.addAndGet(-1)
-        }
-      } while(value > capacity)
+    override def dequeue(): Envelope = { poll() }
+
+    override def enqueue(receiver: ActorRef, handle: Envelope): Unit = { add(handle) }
+
+    override def dropMessage(e: Envelope) = {
+      deadLetters.foreach(_ ! e)
     }
   }
 }
 
-class NonBlockingBoundedMailbox(val capacity: Long) extends MailboxType with ProducesMessageQueue[NonBlockingBoundedMailbox.NonBlockingBoundedMessageQueue] {
+class NonBlockingBoundedMailbox(val capacity: Long, queueAuditDuration: Long, dropMessagesToDeadLetters: Boolean)
+  extends MailboxType with ProducesMessageQueue[NonBlockingBoundedMailbox.Nbbmq] {
 
   import NonBlockingBoundedMailbox._
 
-  // This constructor signature must exist, it will be called by Akka
   def this(settings: ActorSystem.Settings, config: Config) = {
-    this(config.getLong("mailbox-capacity"))
+    this(config.getLong("mailbox-capacity"),
+      config.getBoolean("drop-messages-to-dead-letters"))
   }
 
-  // The create method is called to create the MessageQueue
   final override def create(owner: Option[ActorRef],
-                            system: Option[ActorSystem]): MessageQueue =
-    new NonBlockingBoundedMessageQueue(capacity)
+                            system: Option[ActorSystem]): MessageQueue = {
+    val deadLetters = if(dropMessagesToDeadLetters) system.map(_.deadLetters) else None
+    new Nbbmq(capacity, deadLetters)
+  }
 }
