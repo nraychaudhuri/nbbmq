@@ -1,7 +1,7 @@
 import akka.actor.{Props, ActorSystem, Actor}
 import akka.dispatch.RequiresMessageQueue
 import com.typesafe.config.ConfigFactory
-import nbbmq.akka.mailbox.{NonBlockingBoundedQueue, NonBlockingBoundedMessageQueueSemantics}
+import nbbmq.akka.mailbox.NonBlockingBoundedMessageQueueSemantics
 
 object Main extends App {
 
@@ -10,7 +10,7 @@ object Main extends App {
       case message =>
         Thread.sleep(10)
         if(message == null) println("Received null message")
-        //println(">>>> Processing..." + message)
+//        println(">>>> Processing..." + message)
     }
   }
 

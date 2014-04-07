@@ -1,11 +1,15 @@
 package nbbmq.akka.mailbox
 
 import akka.dispatch._
-import akka.actor.{Scheduler, ActorSystem, ActorRef}
+import akka.actor.{ActorSystem, ActorRef}
 import com.typesafe.config.Config
-import nbbmq.akka.util.AtomicCounter
 
 
+/**
+ * Defining semantics of non-blocking bounded queue where oldest messages are dropped from the queue eventually when it grows
+ * out of the given capacity.The common use case of these kind of queues are processing real-time events where its ok to drop
+ * old events (messages) when queue is backed up.
+ */
 trait NonBlockingBoundedMessageQueueSemantics {
   def capacity: Long
 }
@@ -31,7 +35,13 @@ object NonBlockingBoundedMailbox {
   }
 }
 
-class NonBlockingBoundedMailbox(val capacity: Long, queueAuditDuration: Long, dropMessagesToDeadLetters: Boolean)
+/**
+ * Akka Mailbox implementation of Non-blocking bounded message queue.
+ *
+ * @param capacity the approx capacity of the queue
+ * @param dropMessagesToDeadLetters set to true if you want to send drop messages to dead letters
+ */
+class NonBlockingBoundedMailbox(val capacity: Long, dropMessagesToDeadLetters: Boolean)
   extends MailboxType with ProducesMessageQueue[NonBlockingBoundedMailbox.Nbbmq] {
 
   import NonBlockingBoundedMailbox._
