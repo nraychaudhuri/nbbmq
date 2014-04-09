@@ -4,81 +4,90 @@ import nbbmq.akka.util.AtomicCounter
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.annotation.tailrec
+import akka.util.Unsafe
+import scala.reflect.ClassTag
 
 /**
- * Non-blocking bound queue implementation for Akka mailbox where it is ok to drop old messages. It uses capacity to
- * keep a check on the size of the queue. Because of the asynchronous nature of these queues, determining the current
- * number of elements is not feasible so maintaining exact capacity size is not possible. Instead it is using an efficient
- * an atomic counter(Unsafe.putOrderedLong) to determine the approx size(could be off from the real size) and
- * drop messages from head of the queue to balance the size.
+ * Non-blocking bound queue implementation for Akka mailbox where it is ok to drop old messages. Internally the queue
+ * is backed by an ring buffer where if queue is full old messages are overridden by new messagesa and head always
+ * points to the oldest available message in the queue.
  *
- *
- * @param capacity The approx size that you want to maintain for the queue
- * @tparam E Type of element it queues
+ * @param capacity the size of the queue. Make sure this value == 2 pow n
+ * @tparam A Type of element it queues
  */
-class NonBlockingBoundedQueue[E](val capacity: Long) {
+class NonBlockingBoundedQueue[A:ClassTag](capacity: Int) {
 
-  //running count of number of elements inserted in a queue
-  private[mailbox] val currentCount = new AtomicCounter(0)
+  private val unsafe = Unsafe.instance
+  private val arrayBase = unsafe.arrayBaseOffset(classOf[Array[Any]])
+  private val arrayScale = calculateShiftForScale(unsafe.arrayIndexScale(classOf[Array[Any]]))
 
-  //cleanup flag so that one thread can take the responsibility of drop messages
-  //if the queue grows out of size. This is required so that we don't run the cleanup on
-  //multiple threads and drain the queue.
-  private[mailbox] val cleaningNow = new AtomicBoolean(false)
+  //Make sure the capacity is some value that is power of 2. This important for the efficient bitwise module
+  //calculation.
+  val actualCapacity = findNextPositivePowerOfTwo(capacity)
+  private val ringSize = actualCapacity - 1
+  private val buffer = Array.ofDim[A](actualCapacity)
 
-  private val queue = new ConcurrentLinkedQueue[E]()
+  private val head = new AtomicCounter(0)
+  private val tail = new AtomicCounter(0)
 
-  def isEmpty = queue.isEmpty
-  def count() = queue.size()
+  def offer(elem: A): Boolean = {
+    var currentTail: Long = 0L
+    do {
+      currentTail = tail.get
+    } while (!tail.compareAndSet(currentTail, currentTail + 1))
 
-  def poll(): E = {
-    val e = queue.poll()
-    //should perform better than volatile write. The trade of is not all threads will see the updated
-    //value immediately
-    if(e != null) { currentCount.addOrdered(-1L) }
-    e
-  }
-
-  def add(handle: E) = {
-    queue.add(handle)
-    currentCount.addOrdered(1L)  //using Unsafe.putOrderedLong for better performance
-    resizeQueueMaybe()
-  }
-
-  def resizeQueueMaybe(): Unit = {
-    val value = currentCount.get()
-    //only do clean up when we grow out of capacity and nobody else
-    //has started it
-    //TODO: We do have a additional volatile read here. I wish there was
-    //a more efficient way to doing it
-    if(value > capacity && !cleaningNow.get()) {
-      cleaningNow.set(true)
-      resizeQueue(value)
-      cleaningNow.set(false)
+    //checking whether we are overriding oldest queue element
+    var currentHead = head.get
+    if (currentTail >= (currentHead + actualCapacity)) {
+      //move the head to the next oldest message in the queue
+      val newHead = currentTail - ringSize
+      //avoiding possible race here to make sure that we don't move head backward
+      while(newHead > currentHead && !head.compareAndSet(currentHead, newHead)) {
+        currentHead = head.get()
+      }
     }
+    val index: Int = currentTail.asInstanceOf[Int] & ringSize
+    unsafe.putOrderedObject(buffer, calculateOffset(index), elem)
+
+    return true
   }
 
-  @tailrec
-  private def resizeQueue(count: Long): Unit = {
-    if(count <= capacity)
-      ()
-    else {
-      dropMessageMaybe()
-      resizeQueue(currentCount.get())
-    }
+  def poll(): A = {
+    var currentHead: Long = 0L
+    val currentTail = tail.get()
+    do {
+      currentHead = head.get();
+      if (currentHead >= currentTail) {
+        return null.asInstanceOf[A];
+      }
+    } while (!head.compareAndSet(currentHead, currentHead + 1));
+
+    val index: Int = currentHead.asInstanceOf[Int] & ringSize
+    getElementVolatile(index)
   }
 
-  private def dropMessageMaybe() = {
-    val e = poll()
-    //most likely the queue is empty. Lets use this
-    // as a opportunity to correct the running total
-    if(e == null)
-       auditCount()
-    else
-      dropMessage(e)
+  def isEmpty: Boolean = tail.get() == head.get()
+
+  def size(): Int = {
+    val size = tail.get() - head.get()
+    return size.toInt
   }
 
-  private def auditCount() = currentCount.setOrdered(0L)
+  private def getElementVolatile(index: Int): A = {
+    return unsafe.getObjectVolatile(buffer, calculateOffset(index)).asInstanceOf[A]
+  }
 
-  def dropMessage(e: E) = { /* do nothing */ }
+  private def calculateOffset(index: Int): Long = {
+    return arrayBase + (index.asInstanceOf[Long] << arrayScale)
+  }
+
+  // How many times should a value be shifted left for a given scale of pointer.
+  private def calculateShiftForScale(scale: Int) = scale match {
+    case 4 => 2
+    case 8 => 3
+    case _ => throw new IllegalStateException("Unknown pointer size")
+  }
+
+  //ex: 4 => 4, 5, => 8, 10 => 16
+  def findNextPositivePowerOfTwo(value: Int): Int =  1 << (32 - Integer.numberOfLeadingZeros(value - 1))
 }
