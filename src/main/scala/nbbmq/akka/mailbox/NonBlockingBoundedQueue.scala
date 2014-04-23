@@ -36,7 +36,7 @@ class NonBlockingBoundedQueue[A:ClassTag](capacity: Int) {
       currentTail = tail.get
     } while (!tail.compareAndSet(currentTail, currentTail + 1))
 
-    //checking whether we are overriding oldest queue element
+    //checking whether we need to override oldest queue element
     var currentHead = head.get
     if (currentTail >= (currentHead + actualCapacity)) {
       //move the head to the next oldest message in the queue

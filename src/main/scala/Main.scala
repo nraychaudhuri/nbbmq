@@ -5,16 +5,11 @@ import java.util.concurrent.atomic.AtomicLong
 import nbbmq.akka.mailbox.{NonBlockingBoundedQueue, NonBlockingBoundedMessageQueueSemantics}
 
 object Main extends App {
-
   class MySpecialActor extends Actor with RequiresMessageQueue[NonBlockingBoundedMessageQueueSemantics] {
     var lastMessage: Long = 0L
     def receive = {
       case message: Long =>
-        if(message < lastMessage) {
-          println(s"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Found old message to process LM ${lastMessage}, NM ${message}")
-        }
         Thread.sleep(10)
-        lastMessage = message
         //println(">>>> Processing..." + message)
     }
   }
@@ -49,7 +44,6 @@ object Main extends App {
         ref ! counter1
       })
   }
-
 
 //  val q = new NonBlockingBoundedQueue[Int](8)
 //    system.scheduler.schedule(2 milliseconds, 1000 * 2 milliseconds) {
